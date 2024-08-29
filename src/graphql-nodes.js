@@ -6,6 +6,7 @@ const {
     introspectionQuery,
     IntrospectionQuery
 } = require(`graphql`)
+const { linkToExecutor } = require('@graphql-tools/links')
 const { fromIntrospectionQuery } = require('graphql-2-json-schema')
 
 const {
@@ -79,7 +80,7 @@ exports.sourceNodes = async (
 
         // Cache the remote schema for performance benefit
         if (!sdl) {
-            introspectionSchema = await introspectSchema(link)
+            introspectionSchema = await introspectSchema(linkToExecutor(link))
             sdl = printSchema(introspectionSchema)
         } else {
             introspectionSchema = buildSchema(sdl)
