@@ -1,5 +1,5 @@
 const fs = require('fs-extra')
-const request = require('graphql-request')
+const { request } = require('graphql-request')
 const { createRemoteFileNode } = require('gatsby-source-filesystem')
 const { sourceNodes } = require('./graphql-nodes')
 const { getRootQuery } = require('./getRootQuery')
