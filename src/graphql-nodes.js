@@ -6,7 +6,8 @@ const {
     introspectionQuery,
     IntrospectionQuery
 } = require(`graphql`)
-const { linkToExecutor } = require('@graphql-tools/links')
+import { buildHTTPExecutor } from '@graphql-tools/executor-http'
+import { schemaFromExecutor } from '@graphql-tools/wrap'
 const { fromIntrospectionQuery } = require('graphql-2-json-schema')
 
 const {
@@ -15,7 +16,8 @@ const {
     transformSchema,
     introspectSchema,
     RenameTypes,
-    mergeSchemas
+    mergeSchemas,
+    makeExecutableSchema
 } = require(`graphql-tools`)
 const { createHttpLink } = require(`apollo-link-http`)
 const fetch = require(`node-fetch`)
@@ -62,8 +64,8 @@ exports.sourceNodes = async (
     if (createLink) {
         link = await createLink(options)
     } else {
-        link = createHttpLink({
-            uri: url,
+        link = buildHTTPExecutor({
+            endpoint: url,
             fetch,
             headers,
             fetchOptions
@@ -73,14 +75,14 @@ exports.sourceNodes = async (
     let introspectionSchema
 
     if (createSchema) {
-        introspectionSchema = await createSchema(options)
+        introspectionSchema = await schemaFromExecutor(options)
     } else {
         const cacheKey = `gatsby-source-wagtail-${typeName}-${fieldName}`
         let sdl = await cache.get(cacheKey)
 
         // Cache the remote schema for performance benefit
         if (!sdl) {
-            introspectionSchema = await introspectSchema(linkToExecutor(link))
+            introspectionSchema = await schemaFromExecutor(link)
             sdl = printSchema(introspectionSchema)
         } else {
             introspectionSchema = buildSchema(sdl)
@@ -90,7 +92,7 @@ exports.sourceNodes = async (
     }
 
     // Create a remote link to the Wagtail GraphQL schema
-    const remoteSchema = makeRemoteExecutableSchema({
+    const remoteSchema = makeExecutableSchema({
         schema: introspectionSchema,
         link
     })
