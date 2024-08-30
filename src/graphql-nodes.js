@@ -1,41 +1,22 @@
-const uuidv4 = require(`uuid/v4`)
-const {
-    buildSchema,
-    printSchema,
-    graphqlSync,
-    introspectionQuery,
-    IntrospectionQuery
-} = require(`graphql`)
-import { buildHTTPExecutor } from '@graphql-tools/executor-http'
-import { schemaFromExecutor } from '@graphql-tools/wrap'
-const { fromIntrospectionQuery } = require('graphql-2-json-schema')
+const { v4: uuidv4 } = require('uuid');
+const { buildSchema, printSchema } = require('graphql');
+const { createHttpLink } = require('@apollo/client/link/http');
+const fetch = require('node-fetch');
+const invariant = require('invariant');
+const traverse = require('traverse');
 
-const {
-    makeRemoteExecutableSchema,
-    delegateToSchema,
-    transformSchema,
-    introspectSchema,
-    RenameTypes,
-    mergeSchemas,
-    makeExecutableSchema
-} = require(`graphql-tools`)
-const { createHttpLink } = require(`apollo-link-http`)
-const fetch = require(`node-fetch`)
-const invariant = require(`invariant`)
-const traverse = require(`traverse`)
+const { NamespaceUnderFieldTransform, StripNonQueryTransform } = require('gatsby-source-graphql/transforms');
+const { createSelection } = require('./utils');
+const { buildHTTPExecutor } = require('@graphql-tools/executor-http');
+const { schemaFromExecutor, wrapSchema, RenameTypes } = require('@graphql-tools/wrap'); // Updated import
+const { mergeSchemas } = require('@graphql-tools/schema');
 
-const {
-    NamespaceUnderFieldTransform,
-    StripNonQueryTransform
-} = require(`gatsby-source-graphql/transforms`)
-
-const { createSelection } = require(`./utils`)
-
+// Define the sourceNodes API
 exports.sourceNodes = async (
     { actions, createNodeId, cache, createContentDigest },
     options
 ) => {
-    const { addThirdPartySchema, createNode } = actions
+    const { addThirdPartySchema, createNode } = actions;
     const {
         url,
         typeName,
@@ -45,120 +26,121 @@ exports.sourceNodes = async (
         createLink,
         createSchema,
         refetchInterval
-    } = options
+    } = options;
 
     invariant(
         typeName && typeName.length > 0,
         `gatsby-source-wagtail requires option \`typeName\` to be specified`
-    )
+    );
     invariant(
         fieldName && fieldName.length > 0,
         `gatsby-source-wagtail requires option \`fieldName\` to be specified`
-    )
+    );
     invariant(
         (url && url.length > 0) || createLink,
         `gatsby-source-wagtail requires either option \`url\` or \`createLink\` callback`
-    )
+    );
 
-    let link
+    let link;
     if (createLink) {
-        link = await createLink(options)
+        link = await createLink(options);
     } else {
-        link = buildHTTPExecutor({
+        link = createHttpLink({
+            uri: url,
+            fetch,
+            headers,
+            fetchOptions
+        });
+    }
+
+    let introspectionSchema;
+    const cacheKey = `gatsby-source-wagtail-${typeName}-${fieldName}`;
+    let sdl = await cache.get(cacheKey);
+
+    // Cache the remote schema for performance benefit
+    if (!sdl) {
+        const executor = buildHTTPExecutor({
             endpoint: url,
             fetch,
             headers,
             fetchOptions
-        })
-    }
+        });
 
-    let introspectionSchema
-
-    if (createSchema) {
-        introspectionSchema = await schemaFromExecutor(options)
+        introspectionSchema = await schemaFromExecutor(executor);
+        sdl = printSchema(introspectionSchema);
+        await cache.set(cacheKey, sdl);
     } else {
-        const cacheKey = `gatsby-source-wagtail-${typeName}-${fieldName}`
-        let sdl = await cache.get(cacheKey)
-
-        // Cache the remote schema for performance benefit
-        if (!sdl) {
-            introspectionSchema = await schemaFromExecutor(link)
-            sdl = printSchema(introspectionSchema)
-        } else {
-            introspectionSchema = buildSchema(sdl)
-        }
-
-        await cache.set(cacheKey, sdl)
+        introspectionSchema = buildSchema(sdl);
     }
 
-    // Create a remote link to the Wagtail GraphQL schema
-    const remoteSchema = makeExecutableSchema({
-        schema: introspectionSchema,
-        link
-    })
+    // Directly use the fetched schema for remote operations
+    const remoteSchema = introspectionSchema;
 
-    // Create a point in the schema that can be used to access Wagtail
-    const nodeId = createNodeId(`gatsby-source-wagtail-${typeName}`)
+    // Create a node for the schema
+    const nodeId = createNodeId(`gatsby-source-wagtail-${typeName}`);
     const node = createSchemaNode({
         id: nodeId,
         typeName,
         fieldName,
         createContentDigest
-    })
-    createNode(node)
+    });
+    createNode(node);
 
     const resolver = (parent, args, context) => {
         context.nodeModel.createPageDependency({
             path: context.path,
             nodeId: nodeId
-        })
-        return {}
-    }
+        });
+        return {};
+    };
 
     // Add some customization of the remote schema
-    let transforms = []
+    const transforms = [
+        new StripNonQueryTransform(),
+        new NamespaceUnderFieldTransform({
+            typeName,
+            fieldName,
+            resolver
+        }),
+        new WagtailRequestTransformer()
+    ];
+
     if (options.prefixTypename) {
-        transforms = [
-            new StripNonQueryTransform(),
-            new RenameTypes(name => `${typeName}_${name}`),
-            new NamespaceUnderFieldTransform({
-                typeName,
-                fieldName,
-                resolver
-            }),
-            new WagtailRequestTransformer()
-        ]
-    } else {
-        transforms = [
-            new StripNonQueryTransform(),
-            new NamespaceUnderFieldTransform({
-                typeName,
-                fieldName,
-                resolver
-            }),
-            new WagtailRequestTransformer()
-        ]
+        transforms.unshift(new RenameTypes(name => `${typeName}_${name}`));
     }
 
     const mergeLocalAndRemoteSchema = async () => {
-        // merge the schema along with custom resolvers
+        // Merge the schema along with custom resolvers
         const schema = mergeSchemas({
-            schemas: [remoteSchema]
-        })
+            schemas: [remoteSchema],
+            typeDefs: /* GraphQL */ `
+                type Query {
+                    _empty: String
+                }
+            `,
+            resolvers: {
+                Query: {
+                    _empty: () => 'Empty resolver'
+                }
+            }
+        });
 
         // Apply any transforms
-        return transformSchema(schema, transforms)
-    }
+        return wrapSchema({
+            schema,
+            transforms,
+        });
+    };
 
     // Add new merged schema to Gatsby
     addThirdPartySchema({
         schema: await mergeLocalAndRemoteSchema()
-    })
+    });
 
     // Allow refreshing of the remote data in DEV mode only
-    if (process.env.NODE_ENV !== `production`) {
+    if (process.env.NODE_ENV !== 'production') {
         if (refetchInterval) {
-            const msRefetchInterval = refetchInterval * 1000
+            const msRefetchInterval = refetchInterval * 1000;
             const refetcher = () => {
                 createNode(
                     createSchemaNode({
@@ -167,39 +149,43 @@ exports.sourceNodes = async (
                         fieldName,
                         createContentDigest
                     })
-                )
-                setTimeout(refetcher, msRefetchInterval)
-            }
-            setTimeout(refetcher, msRefetchInterval)
+                );
+                setTimeout(refetcher, msRefetchInterval);
+            };
+            setTimeout(refetcher, msRefetchInterval);
         }
     }
-}
+};
 
+// Function to create a schema node with a unique type name
 function createSchemaNode({ id, typeName, fieldName, createContentDigest }) {
-    const nodeContent = uuidv4()
-    const nodeContentDigest = createContentDigest(nodeContent)
+    const nodeContent = uuidv4();
+    const nodeContentDigest = createContentDigest(nodeContent);
     return {
         id,
-        typeName: typeName,
-        fieldName: fieldName,
+        typeName,
+        fieldName,
         parent: null,
         children: [],
         internal: {
-            type: `GraphQLSource`,
+            type: `${typeName}GraphQLSource`, // Updated to use a unique type name
             contentDigest: nodeContentDigest,
             ignoreType: true
         }
-    }
+    };
 }
 
+
+// WagtailRequestTransformer class
 class WagtailRequestTransformer {
-    transformSchema = schema => schema
+    transformSchema = schema => schema;
+
     transformRequest = request => {
         for (let node of traverse(request.document.definitions).nodes()) {
             if (
-                node?.kind == 'Field' &&
+                node?.kind === 'Field' &&
                 node?.selectionSet?.selections?.find(
-                    selection => selection?.name?.value == 'imageFile'
+                    selection => selection?.name?.value === 'imageFile'
                 )
             ) {
                 // Add field to AST
@@ -211,16 +197,17 @@ class WagtailRequestTransformer {
                     },
                     arguments: [],
                     directives: []
-                })
+                });
                 // Make sure we have src, height & width details
-                node.selectionSet.selections.push(createSelection('id'))
-                node.selectionSet.selections.push(createSelection('src'))
+                node.selectionSet.selections.push(createSelection('id'));
+                node.selectionSet.selections.push(createSelection('src'));
                 // Break as we don't need to visit any other nodes
-                break
+                break;
             }
         }
 
-        return request
-    }
-    transformResult = result => result
+        return request;
+    };
+
+    transformResult = result => result;
 }

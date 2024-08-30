@@ -16,7 +16,7 @@ import { getMainDefinition } from 'apollo-utilities'
 import { createHttpLink } from 'apollo-link-http'
 import {
     introspectSchema,
-    makeRemoteExecutableSchema,
+    makeExecutableSchema,
     mergeSchemas,
 } from 'graphql-tools'
 
